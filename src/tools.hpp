@@ -1,5 +1,6 @@
 #pragma once
-#include <nlohmann/json.hpp>
+#include <rapidjson/document.h>
+#include <rapidjson/allocators.h>
 #include <string>
 
 struct ToolResult {
@@ -11,8 +12,11 @@ class Tools {
 public:
     explicit Tools(std::string working_dir);
 
-    nlohmann::json definitions() const;
-    ToolResult dispatch(const std::string& name, const nlohmann::json& args);
+    // Returns a rapidjson Document (array) describing all tool schemas.
+    rapidjson::Document definitions() const;
+
+    // args is a parsed JSON object from the LLM tool-call arguments.
+    ToolResult dispatch(const std::string& name, const rapidjson::Value& args);
 
     void set_working_dir(std::string dir) { working_dir_ = std::move(dir); }
     const std::string& get_working_dir() const { return working_dir_; }

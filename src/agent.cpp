@@ -6,8 +6,40 @@
 #include <iostream>
 #include <numeric>
 #include <stdexcept>
+#include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
+#include <rapidjson/error/en.h>
 
-using json = nlohmann::json;
+using namespace rapidjson;
+
+// ---------------------------------------------------------------------------
+// Serialisation helpers
+// ---------------------------------------------------------------------------
+
+// Serialize any rapidjson Value (or Document) to a JSON string.
+static std::string to_string(const Value& v) {
+    StringBuffer sb;
+    Writer<StringBuffer> w(sb);
+    v.Accept(w);
+    return sb.GetString();
+}
+
+// Deep-copy a Value (or Document) into a new Document.
+static Document clone(const Value& src) {
+    Document d;
+    d.CopyFrom(src, d.GetAllocator());
+    return d;
+}
+
+// Build a Document from a JSON string; throws on parse error.
+static Document parse(const std::string& s) {
+    Document d;
+    d.Parse(s.c_str(), s.size());
+    if (d.HasParseError())
+        throw std::runtime_error(std::string("JSON parse error: ") + GetParseError_En(d.GetParseError()));
+    return d;
+}
 
 // ---------------------------------------------------------------------------
 // System prompt
@@ -53,6 +85,19 @@ Rules:
 )";
 
 // ---------------------------------------------------------------------------
+// Build a message Document  {"role": r, "content": c}
+// ---------------------------------------------------------------------------
+
+static Document make_msg(const char* role, const std::string& content) {
+    Document d;
+    d.SetObject();
+    auto& a = d.GetAllocator();
+    d.AddMember("role",    Value(role, a),             a);
+    d.AddMember("content", Value(content.c_str(), a),  a);
+    return d;
+}
+
+// ---------------------------------------------------------------------------
 // Constructor
 // ---------------------------------------------------------------------------
 
@@ -61,7 +106,7 @@ Agent::Agent(std::string api_base, std::string working_dir, std::string model)
     , model_(std::move(model))
     , tools_(std::move(working_dir))
 {
-    messages_.push_back({{"role", "system"}, {"content", SYSTEM_PROMPT}});
+    messages_.push_back(make_msg("system", SYSTEM_PROMPT));
 }
 
 // ---------------------------------------------------------------------------
@@ -70,14 +115,13 @@ Agent::Agent(std::string api_base, std::string working_dir, std::string model)
 
 void Agent::reset() {
     messages_.clear();
-    messages_.push_back({{"role", "system"}, {"content", SYSTEM_PROMPT}});
+    messages_.push_back(make_msg("system", SYSTEM_PROMPT));
 }
 
 void Agent::set_repo(const std::string& path) {
     namespace fs = std::filesystem;
 
     if (!path.empty()) {
-        // Trim leading/trailing whitespace so copy-pasted paths with spaces work
         std::string trimmed = path;
         auto not_space = [](unsigned char c){ return !std::isspace(c); };
         trimmed.erase(trimmed.begin(), std::find_if(trimmed.begin(), trimmed.end(), not_space));
@@ -106,24 +150,32 @@ void Agent::set_repo(const std::string& path) {
 }
 
 void Agent::inject_repo_map() {
-    ToolResult r = tools_.dispatch("list_files", nlohmann::json::object());
+    Document empty;
+    empty.SetObject();
+    ToolResult r = tools_.dispatch("list_files", empty);
 
     std::string content =
         "Repository root: " + tools_.get_working_dir() + "\n\n"
         "File tree:\n" + r.output;
 
-    // Inject as a user message + brief assistant acknowledgement so the model
-    // has the layout in context without needing to call list_files first.
-    messages_.push_back({{"role", "user"},      {"content", content}});
-    messages_.push_back({{"role", "assistant"}, {"content",
-        "Got it. I have the full repository layout and will use it to navigate the codebase."}});
+    messages_.push_back(make_msg("user", content));
+    messages_.push_back(make_msg("assistant",
+        "Got it. I have the full repository layout and will use it to navigate the codebase."));
+}
+
+// ---------------------------------------------------------------------------
+// Estimate serialized size of a message Document
+// ---------------------------------------------------------------------------
+
+static size_t msg_size(const Document& d) {
+    return to_string(d).size();
 }
 
 void Agent::run(const std::string& user_input) {
-    messages_.push_back({{"role", "user"}, {"content", user_input}});
+    messages_.push_back(make_msg("user", user_input));
 
     for (int round = 0; round < MAX_TOOL_ROUNDS; ++round) {
-        json response;
+        Document response;
         try {
             response = chat(messages_);
         } catch (const std::exception& e) {
@@ -131,15 +183,20 @@ void Agent::run(const std::string& user_input) {
             return;
         }
 
-        auto& choice  = response["choices"][0];
-        auto& message = choice["message"];
-        std::string finish = choice.value("finish_reason", "stop");
+        // choices[0].message
+        const Value& choice  = response["choices"][0];
+        const Value& message = choice["message"];
+        std::string finish   = choice.HasMember("finish_reason") && choice["finish_reason"].IsString()
+                               ? choice["finish_reason"].GetString() : "stop";
 
-        messages_.push_back(message);
+        // Push a copy of the message into history
+        messages_.push_back(clone(message));
 
-        // ── No more tool calls: print reply and return ──────────────────────
-        if (finish != "tool_calls" || !message.contains("tool_calls")) {
-            std::string content = message.value("content", "");
+        // ── No more tool calls ───────────────────────────────────────────────
+        if (finish != "tool_calls" || !message.HasMember("tool_calls")) {
+            std::string content;
+            if (message.HasMember("content") && message["content"].IsString())
+                content = message["content"].GetString();
             if (!content.empty())
                 std::cout << "\n" << content << "\n\n";
             trim_history();
@@ -147,27 +204,30 @@ void Agent::run(const std::string& user_input) {
         }
 
         // ── Execute tool calls ───────────────────────────────────────────────
-        for (auto& tc : message["tool_calls"]) {
-            std::string id       = tc["id"];
-            std::string name     = tc["function"]["name"];
-            std::string args_str = tc["function"]["arguments"];
+        for (auto& tc : message["tool_calls"].GetArray()) {
+            std::string id       = tc["id"].GetString();
+            std::string name     = tc["function"]["name"].GetString();
+            std::string args_str = tc["function"]["arguments"].GetString();
 
-            json args;
-            try { args = json::parse(args_str); }
-            catch (...) { args = json::object(); }
+            Document args;
+            try { args = parse(args_str); }
+            catch (...) { args.SetObject(); }
 
-            std::cout << "[tool] " << name << "(" << args.dump() << ")\n";
+            std::cout << "[tool] " << name << "(" << args_str << ")\n";
 
             ToolResult result = tools_.dispatch(name, args);
 
             if (!result.success)
                 std::cerr << "  [!] " << result.output << "\n";
 
-            messages_.push_back({
-                {"role",         "tool"},
-                {"tool_call_id", id},
-                {"content",      result.output}
-            });
+            // Build tool-result message
+            Document tool_msg;
+            tool_msg.SetObject();
+            auto& a = tool_msg.GetAllocator();
+            tool_msg.AddMember("role",         Value("tool", a),               a);
+            tool_msg.AddMember("tool_call_id", Value(id.c_str(), a),           a);
+            tool_msg.AddMember("content",      Value(result.output.c_str(), a), a);
+            messages_.push_back(std::move(tool_msg));
         }
     }
 
@@ -177,31 +237,23 @@ void Agent::run(const std::string& user_input) {
 
 // ---------------------------------------------------------------------------
 // History compaction
-//
-// Strategy: messages_ is structured as:
-//   [0]      system prompt          (never removed)
-//   [1..N]   turn 1: user + assistant exchanges + tool results
-//   [N+1..M] turn 2: user + ...
-//   ...
-//
-// We identify "turns" by user-role messages. When over budget we drop the
-// oldest complete turn, keeping at least MIN_TURNS_TO_KEEP recent turns.
 // ---------------------------------------------------------------------------
 
 void Agent::trim_history() {
-    // Estimate total chars in history
+    // Estimate total serialized size
     size_t total = 0;
-    for (auto& m : messages_)
-        total += m.dump().size();
+    for (auto& m : messages_) total += msg_size(m);
 
     if (total <= context_limit_) return;
 
-    // Find indices of all user messages (turn starts), skipping system at [0]
     auto find_user_indices = [&]() {
         std::vector<size_t> idx;
-        for (size_t i = 1; i < messages_.size(); ++i)
-            if (messages_[i]["role"] == "user")
+        for (size_t i = 1; i < messages_.size(); ++i) {
+            const auto& m = messages_[i];
+            if (m.HasMember("role") && m["role"].IsString() &&
+                std::string(m["role"].GetString()) == "user")
                 idx.push_back(i);
+        }
         return idx;
     };
 
@@ -210,13 +262,12 @@ void Agent::trim_history() {
         auto user_idx = find_user_indices();
         if (user_idx.size() <= MIN_TURNS_TO_KEEP) break;
 
-        // Range to remove: from oldest user message up to (not including) the next user message
         size_t cut_start = user_idx[0];
         size_t cut_end   = user_idx[1];
 
         size_t removed = 0;
         for (size_t i = cut_start; i < cut_end; ++i)
-            removed += messages_[i].dump().size();
+            removed += msg_size(messages_[i]);
 
         messages_.erase(messages_.begin() + cut_start,
                         messages_.begin() + cut_end);
@@ -235,22 +286,44 @@ void Agent::trim_history() {
 // LLM call
 // ---------------------------------------------------------------------------
 
-json Agent::chat(const std::vector<json>& messages) {
-    json body = {
-        {"messages",    json(messages)},
-        {"tools",       tools_.definitions()},
-        {"tool_choice", "auto"},
-        {"temperature", 0.2},
-        {"max_tokens",  4096}
-    };
-    if (!model_.empty()) body["model"] = model_;
+Document Agent::chat(const std::vector<Document>& messages) {
+    Document body;
+    body.SetObject();
+    auto& a = body.GetAllocator();
+
+    // "messages" array
+    Value msgs_arr(kArrayType);
+    for (auto& m : messages) {
+        Value copy;
+        copy.CopyFrom(m, a);
+        msgs_arr.PushBack(copy, a);
+    }
+    body.AddMember("messages", msgs_arr, a);
+
+    // "tools" array — deep-copy from definitions() Document
+    {
+        Document defs = tools_.definitions();
+        Value tools_val;
+        tools_val.CopyFrom(defs, a);
+        body.AddMember("tools", tools_val, a);
+    }
+
+    body.AddMember("tool_choice", Value("auto", a), a);
+    body.AddMember("temperature", Value(0.2),       a);
+    body.AddMember("max_tokens",  Value(4096),      a);
+
+    if (!model_.empty())
+        body.AddMember("model", Value(model_.c_str(), a), a);
 
     std::string resp_str = http_post("/v1/chat/completions", body);
 
-    json resp = json::parse(resp_str);
-    if (resp.contains("error"))
-        throw std::runtime_error(resp["error"].value("message", "unknown error"));
-
+    Document resp = parse(resp_str);
+    if (resp.HasMember("error") && resp["error"].IsObject()) {
+        std::string msg = "unknown error";
+        if (resp["error"].HasMember("message") && resp["error"]["message"].IsString())
+            msg = resp["error"]["message"].GetString();
+        throw std::runtime_error(msg);
+    }
     return resp;
 }
 
@@ -258,7 +331,7 @@ json Agent::chat(const std::vector<json>& messages) {
 // HTTP helper
 // ---------------------------------------------------------------------------
 
-std::string Agent::http_post(const std::string& path, const json& body) {
+std::string Agent::http_post(const std::string& path, const Document& body) {
     std::string base = api_base_;
     if (base.starts_with("http://"))  base = base.substr(7);
     if (base.starts_with("https://")) base = base.substr(8);
@@ -276,7 +349,9 @@ std::string Agent::http_post(const std::string& path, const json& body) {
     cli.set_read_timeout(120);
     cli.set_write_timeout(30);
 
-    auto res = cli.Post(path, body.dump(), "application/json");
+    std::string json_body = to_string(body);
+
+    auto res = cli.Post(path, json_body, "application/json");
     if (!res)
         throw std::runtime_error("HTTP error: " + httplib::to_string(res.error()));
     if (res->status != 200)

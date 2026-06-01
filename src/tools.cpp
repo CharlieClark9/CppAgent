@@ -9,35 +9,29 @@
 #include <iostream>
 #include <algorithm>
 #include <vector>
+#include <rapidjson/document.h>
+#include <rapidjson/stringbuffer.h>
+#include <rapidjson/writer.h>
 
 namespace fs = std::filesystem;
+using namespace rapidjson;
 
 static const std::vector<std::string> SKIP_DIRS = {
     ".git", "build", "out", "node_modules", "__pycache__", ".vs", ".cache", ".next",
     ".nuxt", ".svelte-kit", "coverage", ".turbo"
 };
 
-// Binary or generated files that are never useful to read or search.
 static const std::unordered_set<std::string> SKIP_EXTS = {
-    // images
     ".png", ".jpg", ".jpeg", ".gif", ".ico", ".webp", ".bmp", ".tiff", ".avif",
-    // fonts
     ".woff", ".woff2", ".ttf", ".otf", ".eot",
-    // compiled / binary
     ".exe", ".dll", ".so", ".dylib", ".obj", ".lib", ".pdb", ".ilk", ".exp",
     ".class", ".pyc", ".pyo",
-    // archives
     ".zip", ".gz", ".tar", ".rar", ".7z", ".bz2",
-    // media
     ".mp3", ".mp4", ".wav", ".ogg", ".avi", ".mov",
-    // documents
     ".pdf", ".docx", ".xlsx", ".pptx",
-    // misc large generated
-    ".map",      // JS source maps — huge, machine-generated
-    ".min.js",   // won't match via extension alone, handled below
+    ".map",
 };
 
-// Specific filenames that are valid text but too large / low-signal to search.
 static const std::unordered_set<std::string> SKIP_FILES = {
     "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
     "Cargo.lock", "poetry.lock", "composer.lock", "Gemfile.lock",
@@ -46,172 +40,177 @@ static const std::unordered_set<std::string> SKIP_FILES = {
 Tools::Tools(std::string working_dir) : working_dir_(std::move(working_dir)) {}
 
 // ---------------------------------------------------------------------------
-// Tool schema definitions (OpenAI function-calling format)
+// Tool schema definitions (OpenAI function-calling format) — rapidjson
 // ---------------------------------------------------------------------------
 
-nlohmann::json Tools::definitions() const {
-    return nlohmann::json::array({
-        {
-            {"type", "function"},
-            {"function", {
-                {"name", "list_files"},
-                {"description",
-                    "List files in a directory tree. Use this first to understand repo structure "
-                    "before reading anything. Skips .git, build, node_modules automatically."},
-                {"parameters", {
-                    {"type", "object"},
-                    {"properties", {
-                        {"directory", {{"type", "string"}, {"description", "Directory to list (default: working directory)"}}},
-                        {"pattern",   {{"type", "string"}, {"description", "Optional glob pattern, e.g. '*.cpp', '*.hpp'. Omit to list all files."}}}
-                    }},
-                    {"required", nlohmann::json::array()}
-                }}
-            }}
-        },
-        {
-            {"type", "function"},
-            {"function", {
-                {"name", "read_file"},
-                {"description",
-                    "Read the full contents of a file. Use read_file_range instead for large files "
-                    "when you only need a specific section."},
-                {"parameters", {
-                    {"type", "object"},
-                    {"properties", {
-                        {"path", {{"type", "string"}, {"description", "File path to read (relative to working directory)"}}}
-                    }},
-                    {"required", {"path"}}
-                }}
-            }}
-        },
-        {
-            {"type", "function"},
-            {"function", {
-                {"name", "read_file_range"},
-                {"description",
-                    "Read a specific line range from a file. Prefer this over read_file for large files. "
-                    "Lines are 1-based. Use search_files first to find the relevant line numbers."},
-                {"parameters", {
-                    {"type", "object"},
-                    {"properties", {
-                        {"path",       {{"type", "string"},  {"description", "File path to read"}}},
-                        {"start_line", {{"type", "integer"}, {"description", "First line to read (1-based)"}}},
-                        {"end_line",   {{"type", "integer"}, {"description", "Last line to read (inclusive). Defaults to start_line + 99."}}}
-                    }},
-                    {"required", {"path", "start_line"}}
-                }}
-            }}
-        },
-        {
-            {"type", "function"},
-            {"function", {
-                {"name", "write_file"},
-                {"description", "Write (or overwrite) a file with the given content. Creates parent directories as needed."},
-                {"parameters", {
-                    {"type", "object"},
-                    {"properties", {
-                        {"path",    {{"type", "string"}, {"description", "File path to write"}}},
-                        {"content", {{"type", "string"}, {"description", "Full file content to write"}}}
-                    }},
-                    {"required", {"path", "content"}}
-                }}
-            }}
-        },
-        {
-            {"type", "function"},
-            {"function", {
-                {"name", "run_command"},
-                {"description", "Run a shell command and return stdout + stderr. Use for building, testing, or any OS task."},
-                {"parameters", {
-                    {"type", "object"},
-                    {"properties", {
-                        {"cmd", {{"type", "string"}, {"description", "Command to execute"}}}
-                    }},
-                    {"required", {"cmd"}}
-                }}
-            }}
-        },
-        {
-            {"type", "function"},
-            {"function", {
-                {"name", "search_files"},
-                {"description",
-                    "Search for a regex pattern across files. Results are grouped by file. "
-                    "Use this to locate definitions, usages, or any string before reading files. "
-                    "On large repos, ALWAYS pass file_glob to limit the search to relevant file types "
-                    "(e.g. '*.cpp,*.hpp' or '*.ts,*.tsx') — this is faster and cuts noise. "
-                    "Uses ripgrep automatically when installed."},
-                {"parameters", {
-                    {"type", "object"},
-                    {"properties", {
-                        {"pattern",   {{"type", "string"}, {"description", "Regex pattern to search for"}}},
-                        {"directory", {{"type", "string"}, {"description", "Directory to search (default: working directory)"}}},
-                        {"file_glob", {{"type", "string"}, {"description", "Optional comma-separated file globs to restrict the search, e.g. '*.cpp,*.hpp'. Omit to search all text files."}}}
-                    }},
-                    {"required", {"pattern"}}
-                }}
-            }}
-        },
-        {
-            {"type", "function"},
-            {"function", {
-                {"name", "edit_file"},
-                {"description",
-                    "Replace an exact piece of text in a file. This is the PREFERRED way to edit existing files. "
-                    "old_text must match the file EXACTLY (including indentation and whitespace) and must be UNIQUE "
-                    "— if it appears zero times or more than once, the edit is rejected and nothing changes. "
-                    "Copy old_text directly from a recent read_file_range so it matches. Include a few surrounding "
-                    "lines if needed to make it unique. No line numbers are used, so this is safe against line drift."},
-                {"parameters", {
-                    {"type", "object"},
-                    {"properties", {
-                        {"path",     {{"type", "string"}, {"description", "File path to edit"}}},
-                        {"old_text", {{"type", "string"}, {"description", "Exact text to find and replace. Must be unique in the file."}}},
-                        {"new_text", {{"type", "string"}, {"description", "Replacement text. May be empty to delete old_text."}}}
-                    }},
-                    {"required", {"path", "old_text", "new_text"}}
-                }}
-            }}
-        },
-        {
-            {"type", "function"},
-            {"function", {
-                {"name", "replace_block"},
-                {"description",
-                    "Replace a whole block of lines bounded by two text anchors (inclusive). Use this for removing or "
-                    "replacing large multi-line sections (e.g. an entire <header>...</header> block) where copying "
-                    "the exact text for edit_file would be error-prone. The tool finds the first line containing "
-                    "start_anchor, then the first line at or after it containing end_anchor, and replaces everything "
-                    "between them. Choose distinctive anchors (e.g. '<header' and '</header>'), not generic ones like '</div>'."},
-                {"parameters", {
-                    {"type", "object"},
-                    {"properties", {
-                        {"path",         {{"type", "string"}, {"description", "File path to edit"}}},
-                        {"start_anchor", {{"type", "string"}, {"description", "Text identifying the first line of the block to replace"}}},
-                        {"end_anchor",   {{"type", "string"}, {"description", "Text identifying the last line of the block (first match at or after start)"}}},
-                        {"new_text",     {{"type", "string"}, {"description", "Replacement text for the whole block. May be empty to delete it."}}}
-                    }},
-                    {"required", {"path", "start_anchor", "end_anchor", "new_text"}}
-                }}
-            }}
-        },
-        {
-            {"type", "function"},
-            {"function", {
-                {"name", "finish_task"},
-                {"description",
-                    "Signal that the current task is fully complete. Call this once all work is done "
-                    "and verified. The summary is shown to the user as the final result."},
-                {"parameters", {
-                    {"type", "object"},
-                    {"properties", {
-                        {"summary", {{"type", "string"}, {"description", "Concise description of everything that was done"}}}
-                    }},
-                    {"required", {"summary"}}
-                }}
-            }}
-        }
-    });
+// Helper: build a simple {"type":"string","description":"..."} property value.
+static Value prop_str(const char* desc, Document::AllocatorType& a) {
+    Value v(kObjectType);
+    v.AddMember("type", Value("string", a), a);
+    v.AddMember("description", Value(desc, a), a);
+    return v;
+}
+static Value prop_int(const char* desc, Document::AllocatorType& a) {
+    Value v(kObjectType);
+    v.AddMember("type", Value("integer", a), a);
+    v.AddMember("description", Value(desc, a), a);
+    return v;
+}
+
+// Build a function-tool entry.
+static Value make_tool(const char* name, const char* description,
+                       Value& properties, Value& required,
+                       Document::AllocatorType& a) {
+    Value params(kObjectType);
+    params.AddMember("type", Value("object", a), a);
+    params.AddMember("properties", properties, a);
+    params.AddMember("required", required, a);
+
+    Value fn(kObjectType);
+    fn.AddMember("name",        Value(name, a),        a);
+    fn.AddMember("description", Value(description, a), a);
+    fn.AddMember("parameters",  params,                a);
+
+    Value tool(kObjectType);
+    tool.AddMember("type",     Value("function", a), a);
+    tool.AddMember("function", fn,                   a);
+    return tool;
+}
+
+Document Tools::definitions() const {
+    Document doc;
+    doc.SetArray();
+    auto& a = doc.GetAllocator();
+
+    // ── list_files ──────────────────────────────────────────────────────────
+    {
+        Value props(kObjectType);
+        props.AddMember("directory", prop_str("Directory to list (default: working directory)", a), a);
+        props.AddMember("pattern",   prop_str("Optional glob pattern, e.g. '*.cpp'. Omit to list all.", a), a);
+        Value req(kArrayType);
+        doc.PushBack(make_tool("list_files",
+            "List files in a directory tree. Use this first to understand repo structure "
+            "before reading anything. Skips .git, build, node_modules automatically.",
+            props, req, a), a);
+    }
+
+    // ── read_file ────────────────────────────────────────────────────────────
+    {
+        Value props(kObjectType);
+        props.AddMember("path", prop_str("File path to read (relative to working directory)", a), a);
+        Value req(kArrayType);
+        req.PushBack(Value("path", a), a);
+        doc.PushBack(make_tool("read_file",
+            "Read the full contents of a file. Use read_file_range instead for large files "
+            "when you only need a specific section.",
+            props, req, a), a);
+    }
+
+    // ── read_file_range ──────────────────────────────────────────────────────
+    {
+        Value props(kObjectType);
+        props.AddMember("path",       prop_str("File path to read", a), a);
+        props.AddMember("start_line", prop_int("First line to read (1-based)", a), a);
+        props.AddMember("end_line",   prop_int("Last line to read (inclusive). Defaults to start_line + 99.", a), a);
+        Value req(kArrayType);
+        req.PushBack(Value("path", a), a);
+        req.PushBack(Value("start_line", a), a);
+        doc.PushBack(make_tool("read_file_range",
+            "Read a specific line range from a file. Prefer this over read_file for large files. "
+            "Lines are 1-based. Use search_files first to find the relevant line numbers.",
+            props, req, a), a);
+    }
+
+    // ── write_file ───────────────────────────────────────────────────────────
+    {
+        Value props(kObjectType);
+        props.AddMember("path",    prop_str("File path to write", a), a);
+        props.AddMember("content", prop_str("Full file content to write", a), a);
+        Value req(kArrayType);
+        req.PushBack(Value("path", a), a);
+        req.PushBack(Value("content", a), a);
+        doc.PushBack(make_tool("write_file",
+            "Write (or overwrite) a file with the given content. Creates parent directories as needed.",
+            props, req, a), a);
+    }
+
+    // ── run_command ──────────────────────────────────────────────────────────
+    {
+        Value props(kObjectType);
+        props.AddMember("cmd", prop_str("Command to execute", a), a);
+        Value req(kArrayType);
+        req.PushBack(Value("cmd", a), a);
+        doc.PushBack(make_tool("run_command",
+            "Run a shell command and return stdout + stderr. Use for building, testing, or any OS task.",
+            props, req, a), a);
+    }
+
+    // ── search_files ─────────────────────────────────────────────────────────
+    {
+        Value props(kObjectType);
+        props.AddMember("pattern",   prop_str("Regex pattern to search for", a), a);
+        props.AddMember("directory", prop_str("Directory to search (default: working directory)", a), a);
+        props.AddMember("file_glob", prop_str(
+            "Optional comma-separated file globs to restrict the search, e.g. '*.cpp,*.hpp'.", a), a);
+        Value req(kArrayType);
+        req.PushBack(Value("pattern", a), a);
+        doc.PushBack(make_tool("search_files",
+            "Search for a regex pattern across files. Results are grouped by file. "
+            "Use this to locate definitions, usages, or any string before reading files. "
+            "On large repos, ALWAYS pass file_glob to limit the search to relevant file types. "
+            "Uses ripgrep automatically when installed.",
+            props, req, a), a);
+    }
+
+    // ── edit_file ────────────────────────────────────────────────────────────
+    {
+        Value props(kObjectType);
+        props.AddMember("path",     prop_str("File path to edit", a), a);
+        props.AddMember("old_text", prop_str("Exact text to find and replace. Must be unique in the file.", a), a);
+        props.AddMember("new_text", prop_str("Replacement text. May be empty to delete old_text.", a), a);
+        Value req(kArrayType);
+        req.PushBack(Value("path", a), a);
+        req.PushBack(Value("old_text", a), a);
+        req.PushBack(Value("new_text", a), a);
+        doc.PushBack(make_tool("edit_file",
+            "Replace an exact piece of text in a file. This is the PREFERRED way to edit existing files. "
+            "old_text must match the file EXACTLY (including indentation and whitespace) and must be UNIQUE "
+            "— if it appears zero times or more than once, the edit is rejected and nothing changes. "
+            "Copy old_text directly from a recent read_file_range so it matches.",
+            props, req, a), a);
+    }
+
+    // ── replace_block ────────────────────────────────────────────────────────
+    {
+        Value props(kObjectType);
+        props.AddMember("path",         prop_str("File path to edit", a), a);
+        props.AddMember("start_anchor", prop_str("Text identifying the first line of the block to replace", a), a);
+        props.AddMember("end_anchor",   prop_str("Text identifying the last line of the block (first match at or after start)", a), a);
+        props.AddMember("new_text",     prop_str("Replacement text for the whole block. May be empty to delete it.", a), a);
+        Value req(kArrayType);
+        req.PushBack(Value("path", a), a);
+        req.PushBack(Value("start_anchor", a), a);
+        req.PushBack(Value("end_anchor", a), a);
+        req.PushBack(Value("new_text", a), a);
+        doc.PushBack(make_tool("replace_block",
+            "Replace a whole block of lines bounded by two text anchors (inclusive). Use this for removing or "
+            "replacing large multi-line sections where copying exact text for edit_file would be error-prone.",
+            props, req, a), a);
+    }
+
+    // ── finish_task ──────────────────────────────────────────────────────────
+    {
+        Value props(kObjectType);
+        props.AddMember("summary", prop_str("Concise description of everything that was done", a), a);
+        Value req(kArrayType);
+        req.PushBack(Value("summary", a), a);
+        doc.PushBack(make_tool("finish_task",
+            "Signal that the current task is fully complete. Call this once all work is done "
+            "and verified. The summary is shown to the user as the final result.",
+            props, req, a), a);
+    }
+
+    return doc;
 }
 
 // ---------------------------------------------------------------------------
@@ -236,24 +235,20 @@ std::string Tools::relative(const std::string& abs_path) const {
 // list_files
 // ---------------------------------------------------------------------------
 
-// Returns true if this file should be skipped entirely.
 static bool should_skip_file(const fs::path& p) {
     std::string name = p.filename().string();
     if (SKIP_FILES.count(name)) return true;
 
     std::string ext = p.extension().string();
-    // Lowercase the extension for case-insensitive matching
     for (char& c : ext) c = (char)std::tolower((unsigned char)c);
     if (SKIP_EXTS.count(ext)) return true;
 
-    // Catch *.min.js, *.min.css (two-part "extension")
     if (name.size() > 7 && name.substr(name.size() - 7) == ".min.js")  return true;
     if (name.size() > 8 && name.substr(name.size() - 8) == ".min.css") return true;
 
     return false;
 }
 
-// Convert a simple glob pattern (*.cpp, *.hpp) to a regex.
 static std::regex glob_to_regex(const std::string& glob) {
     std::string re;
     re.reserve(glob.size() * 2);
@@ -302,7 +297,6 @@ ToolResult Tools::list_files(const std::string& dir, const std::string& pattern)
             std::string filename = it->path().filename().string();
             if (filter && !std::regex_match(filename, *filter)) continue;
 
-            // Count lines cheaply
             std::ifstream f(it->path(), std::ios::binary);
             int lines = 0;
             if (f) {
@@ -422,7 +416,6 @@ ToolResult Tools::run_command(const std::string& cmd) {
     constexpr size_t MAX = 16'000;
     bool truncated = output.size() > MAX;
     if (truncated) {
-        // Keep the tail — compiler errors appear at the end
         output = output.substr(output.size() - MAX);
         output = "[...truncated, showing last 16 000 chars]\n" + output;
     }
@@ -437,7 +430,6 @@ ToolResult Tools::run_command(const std::string& cmd) {
 
 static constexpr int SEARCH_MAX_MATCHES = 300;
 
-// Parse a comma-separated glob list ("*.cpp, *.hpp") into filename regexes.
 static std::vector<std::regex> parse_globs(const std::string& csv) {
     std::vector<std::regex> out;
     std::stringstream ss(csv);
@@ -452,7 +444,6 @@ static std::vector<std::regex> parse_globs(const std::string& csv) {
     return out;
 }
 
-// Lazily probe (once) whether `rg` is on PATH.
 bool Tools::ripgrep_available() {
     if (rg_state_ >= 0) return rg_state_ == 1;
     std::string out;
@@ -480,7 +471,6 @@ ToolResult Tools::search_with_ripgrep(const std::string& pattern, const std::str
                                       const std::string& file_glob, bool& ok) {
     ok = true;
 
-    // Escape the pattern for cmd/sh double-quoting (regex backslashes pass through).
     std::string esc;
     for (char c : pattern) { if (c == '"') esc += "\\\""; else esc += c; }
 
@@ -552,7 +542,7 @@ ToolResult Tools::search_with_ripgrep(const std::string& pattern, const std::str
 #endif
 
     if (total == 0) {
-        if (rc == 2) { ok = false; return {false, "ripgrep error"}; }  // bad regex etc. -> fall back
+        if (rc == 2) { ok = false; return {false, "ripgrep error"}; }
         return {true, "No matches found for '" + pattern + "'"};
     }
 
@@ -648,7 +638,6 @@ ToolResult Tools::search_files(const std::string& pattern, const std::string& di
         bool ok = false;
         ToolResult r = search_with_ripgrep(pattern, search_root, file_glob, ok);
         if (ok) return r;
-        // ripgrep errored (e.g. dialect mismatch) — fall back to the native walk
     }
     return search_native(pattern, search_root, file_glob);
 }
@@ -657,21 +646,18 @@ ToolResult Tools::search_files(const std::string& pattern, const std::string& di
 // File-edit helpers
 // ---------------------------------------------------------------------------
 
-// Read a whole file, normalising CRLF/CR line endings to LF so matching is
-// independent of the file's on-disk line endings. Returns false if unreadable.
 static bool read_normalized(const std::string& full, std::string& out) {
     std::ifstream f(full, std::ios::binary);
     if (!f) return false;
     std::ostringstream ss;
     ss << f.rdbuf();
     out = ss.str();
-    // CRLF -> LF
     std::string norm;
     norm.reserve(out.size());
     for (size_t i = 0; i < out.size(); ++i) {
         if (out[i] == '\r') {
-            if (i + 1 < out.size() && out[i + 1] == '\n') continue; // drop CR of CRLF
-            norm += '\n';                                           // lone CR -> LF
+            if (i + 1 < out.size() && out[i + 1] == '\n') continue;
+            norm += '\n';
         } else {
             norm += out[i];
         }
@@ -698,7 +684,7 @@ static size_t count_occurrences(const std::string& hay, const std::string& needl
 }
 
 // ---------------------------------------------------------------------------
-// edit_file  (exact string replacement with a uniqueness guarantee)
+// edit_file
 // ---------------------------------------------------------------------------
 
 ToolResult Tools::edit_file(const std::string& path, const std::string& old_text,
@@ -712,7 +698,6 @@ ToolResult Tools::edit_file(const std::string& path, const std::string& old_text
     if (!read_normalized(full, content))
         return {false, "Error: cannot open '" + full + "'"};
 
-    // Normalise the search text the same way the file was normalised
     std::string needle;
     needle.reserve(old_text.size());
     for (size_t i = 0; i < old_text.size(); ++i) {
@@ -759,7 +744,7 @@ ToolResult Tools::edit_file(const std::string& path, const std::string& old_text
 }
 
 // ---------------------------------------------------------------------------
-// replace_block  (replace everything between two text anchors, inclusive)
+// replace_block
 // ---------------------------------------------------------------------------
 
 ToolResult Tools::replace_block(const std::string& path, const std::string& start_anchor,
@@ -773,7 +758,6 @@ ToolResult Tools::replace_block(const std::string& path, const std::string& star
     if (!read_normalized(full, content))
         return {false, "Error: cannot open '" + full + "'"};
 
-    // Split into lines (LF already normalised)
     std::vector<std::string> lines;
     {
         std::istringstream ss(content);
@@ -794,7 +778,6 @@ ToolResult Tools::replace_block(const std::string& path, const std::string& star
         return {false, "Error: end_anchor \"" + end_anchor +
                        "\" not found at or after start_anchor (line " + std::to_string(start_idx + 1) + ")."};
 
-    // Capture removed block so the model can verify what was cut
     std::ostringstream removed;
     for (int i = start_idx; i <= end_idx; ++i)
         removed << "  " << (i + 1) << ": " << lines[i] << "\n";
@@ -830,7 +813,7 @@ ToolResult Tools::replace_block(const std::string& path, const std::string& star
 }
 
 // ---------------------------------------------------------------------------
-// finish_task  (signals autonomous loop completion)
+// finish_task
 // ---------------------------------------------------------------------------
 
 ToolResult Tools::finish_task(const std::string& summary) {
@@ -840,17 +823,26 @@ ToolResult Tools::finish_task(const std::string& summary) {
 }
 
 // ---------------------------------------------------------------------------
-// Dispatch
+// Dispatch — reads args from a rapidjson Value object
 // ---------------------------------------------------------------------------
 
-ToolResult Tools::dispatch(const std::string& name, const nlohmann::json& args) {
+ToolResult Tools::dispatch(const std::string& name, const rapidjson::Value& args) {
+    // Helper: get string arg or default
     auto str = [&](const char* key, const char* def = "") -> std::string {
-        return args.contains(key) ? args[key].get<std::string>() : def;
+        auto it = args.FindMember(key);
+        if (it == args.MemberEnd() || !it->value.IsString()) return def;
+        return it->value.GetString();
     };
+    // Helper: get int arg or default
     auto num = [&](const char* key, int def = 0) -> int {
-        if (!args.contains(key)) return def;
-        auto& v = args[key];
-        return v.is_number() ? v.get<int>() : std::stoi(v.get<std::string>());
+        auto it = args.FindMember(key);
+        if (it == args.MemberEnd()) return def;
+        if (it->value.IsInt())    return it->value.GetInt();
+        if (it->value.IsDouble()) return (int)it->value.GetDouble();
+        if (it->value.IsString()) {
+            try { return std::stoi(it->value.GetString()); } catch (...) {}
+        }
+        return def;
     };
 
     if (name == "list_files")
