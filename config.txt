@@ -1,0 +1,19 @@
+# CppAgent startup config
+# Lines use key=value. Blank lines and lines starting with # are ignored.
+#
+# CLI positional args still override these values:
+#   CppAgent.exe <working_dir> <api_base> <quick_model> <deep_model>
+# You can also launch with:
+#   CppAgent.exe --config path\to\config.txt
+
+working_dir=.
+api_base=http://192.168.0.209:1234
+
+# Used for short/simple questions.
+quick_model=google/gemma-4-e4b
+
+# Used for code changes, debugging, multi-step work, and deeper reasoning.
+deep_model=google/gemma-4-e4b
+
+context_limit=60000
+auto_max=50
