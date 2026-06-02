@@ -33,7 +33,8 @@ private:
     std::string resolve(const std::string& path) const;
     std::string relative(const std::string& abs_path) const;
 
-    ToolResult list_files(const std::string& dir, const std::string& pattern);
+    ToolResult list_files(const std::string& dir, const std::string& include_globs,
+                          const std::string& exclude_globs, int limit, int offset);
     ToolResult read_file(const std::string& path);
     ToolResult read_file_range(const std::string& path, int start_line, int end_line);
     ToolResult write_file(const std::string& path, const std::string& content);
@@ -41,14 +42,23 @@ private:
     ToolResult replace_block(const std::string& path, const std::string& start_anchor,
                              const std::string& end_anchor, const std::string& new_text);
     ToolResult run_command(const std::string& cmd);
-    ToolResult search_files(const std::string& pattern, const std::string& dir, const std::string& file_glob);
+    ToolResult search_files(const std::string& pattern, const std::string& dir,
+                            const std::string& include_globs, const std::string& exclude_globs,
+                            int limit, int offset);
     ToolResult finish_task(const std::string& summary);
 
     // ripgrep acceleration
     bool ripgrep_available();
+    ToolResult list_files_with_ripgrep(const std::string& root, const std::string& include_globs,
+                                       const std::string& exclude_globs, int limit, int offset,
+                                       bool& ok);
+    ToolResult list_files_native(const std::string& root, const std::string& include_globs,
+                                 const std::string& exclude_globs, int limit, int offset);
     ToolResult search_with_ripgrep(const std::string& pattern, const std::string& root,
-                                   const std::string& file_glob, bool& ok);
+                                   const std::string& include_globs, const std::string& exclude_globs,
+                                   int limit, int offset, bool& ok);
     ToolResult search_native(const std::string& pattern, const std::string& root,
-                             const std::string& file_glob);
+                             const std::string& include_globs, const std::string& exclude_globs,
+                             int limit, int offset);
     int  rg_state_ = -1;   // -1 = not yet probed, 0 = unavailable, 1 = available
 };

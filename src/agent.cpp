@@ -2,10 +2,12 @@
 #define CPPHTTPLIB_NO_SSL
 #include <httplib.h>
 #include <algorithm>
+#include <cctype>
 #include <filesystem>
 #include <iostream>
 #include <numeric>
 #include <stdexcept>
+#include <string_view>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -101,11 +103,14 @@ static Document make_msg(const char* role, const std::string& content) {
 // Constructor
 // ---------------------------------------------------------------------------
 
-Agent::Agent(std::string api_base, std::string working_dir, std::string model)
+Agent::Agent(std::string api_base, std::string working_dir,
+             std::string quick_model, std::string deep_model)
     : api_base_(std::move(api_base))
-    , model_(std::move(model))
+    , quick_model_(std::move(quick_model))
+    , deep_model_(std::move(deep_model))
     , tools_(std::move(working_dir))
 {
+    if (deep_model_.empty()) deep_model_ = quick_model_;
     messages_.push_back(make_msg("system", SYSTEM_PROMPT));
 }
 
@@ -173,11 +178,16 @@ static size_t msg_size(const Document& d) {
 
 void Agent::run(const std::string& user_input) {
     messages_.push_back(make_msg("user", user_input));
+    ModelRoute route = select_model_for(user_input);
+
+    const auto& selected_model = model_for(route);
+    std::cout << "[model] " << route_name(route) << ": "
+              << (selected_model.empty() ? "(server default)" : selected_model) << "\n";
 
     for (int round = 0; round < MAX_TOOL_ROUNDS; ++round) {
         Document response;
         try {
-            response = chat(messages_);
+            response = chat(messages_, route);
         } catch (const std::exception& e) {
             std::cerr << "[error] LLM call failed: " << e.what() << "\n";
             return;
@@ -236,6 +246,60 @@ void Agent::run(const std::string& user_input) {
 }
 
 // ---------------------------------------------------------------------------
+// Model routing
+// ---------------------------------------------------------------------------
+
+static std::string lowercase_copy(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c){ return (char)std::tolower(c); });
+    return s;
+}
+
+static bool contains_any(std::string_view text, const std::vector<std::string_view>& needles) {
+    for (auto needle : needles) {
+        if (text.find(needle) != std::string_view::npos) return true;
+    }
+    return false;
+}
+
+Agent::ModelRoute Agent::select_model_for(const std::string& user_input) const {
+    std::string text = lowercase_copy(user_input);
+
+    const bool likely_continuation = text.starts_with("continue with the task");
+    const bool long_prompt = user_input.size() > 350;
+    const bool asks_for_steps = contains_any(text, {
+        "step by step", "plan", "architecture", "design", "refactor", "implement",
+        "change the code", "modify", "edit", "fix", "debug", "bug", "test",
+        "build", "compile", "error", "failing", "failure", "review", "analyse",
+        "analyze", "reason", "deep", "complex", "multi-step", "autonomous"
+    });
+    const bool mentions_files_or_code = contains_any(text, {
+        ".cpp", ".hpp", ".h", ".cxx", ".cc", ".cmake", "cmakelists", "source",
+        "function", "class", "method", "variable", "repo", "repository", "file",
+        "files", "folder", "directory", "command", "terminal"
+    });
+    const bool simple_question = user_input.size() < 180 && contains_any(text, {
+        "what is", "what's", "who is", "when is", "where is", "define ",
+        "explain ", "summarize ", "quick", "simple"
+    });
+
+    if (likely_continuation || long_prompt || asks_for_steps || mentions_files_or_code)
+        return ModelRoute::Deep;
+    if (simple_question)
+        return ModelRoute::Quick;
+    return ModelRoute::Quick;
+}
+
+const std::string& Agent::model_for(ModelRoute route) const {
+    if (route == ModelRoute::Deep && !deep_model_.empty()) return deep_model_;
+    return quick_model_;
+}
+
+const char* Agent::route_name(ModelRoute route) const {
+    return route == ModelRoute::Deep ? "deep" : "quick";
+}
+
+// ---------------------------------------------------------------------------
 // History compaction
 // ---------------------------------------------------------------------------
 
@@ -286,7 +350,7 @@ void Agent::trim_history() {
 // LLM call
 // ---------------------------------------------------------------------------
 
-Document Agent::chat(const std::vector<Document>& messages) {
+Document Agent::chat(const std::vector<Document>& messages, ModelRoute route) {
     Document body;
     body.SetObject();
     auto& a = body.GetAllocator();
@@ -312,8 +376,9 @@ Document Agent::chat(const std::vector<Document>& messages) {
     body.AddMember("temperature", Value(0.2),       a);
     body.AddMember("max_tokens",  Value(4096),      a);
 
-    if (!model_.empty())
-        body.AddMember("model", Value(model_.c_str(), a), a);
+    const auto& selected_model = model_for(route);
+    if (!selected_model.empty())
+        body.AddMember("model", Value(selected_model.c_str(), a), a);
 
     std::string resp_str = http_post("/v1/chat/completions", body);
 
