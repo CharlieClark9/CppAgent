@@ -21,41 +21,41 @@ static void print_help() {
         "  /reset           - clear conversation history\n"
         "  /auto <task>     - run task autonomously until the model calls finish_task\n"
         "  /automax <n>     - set max /auto iterations (default 50)\n"
-        "  /model <name>    - set both quick and deep models to the same model\n"
-        "  /models <quick> <deep>\n"
-        "                   - set quick and deep model identifiers\n"
         "  /quick <name>    - set the quick-question model\n"
         "  /deep  <name>    - set the deeper-reasoning model\n"
-        "  /api <url>       - change LLM server address (e.g. /api http://192.168.1.50:1234)\n"
+        "  /ip <url>        - change LLM server address\n"
         "  /context <chars> - set context trim limit (default 60000)\n"
         "  startup config   - load cppagent_config.txt, CppAgent/config.txt, or --config <path>\n"
         "  /help            - show this message\n"
-        "  / quit      - exit\n\n";
+        "  /exit            - exit\n\n";
 }
 
 struct StartupConfig {
     std::string working_dir = fs::current_path().string();
-    std::string api_base    = "http://192.168.0.209:1234";
-    std::string quick_model = "google/gemma-4-e4b";
-    std::string deep_model;
+    std::string api_base = "http://127.0.0.1:1234";
+    std::string quick_model = "google/gemma-4-e2b";
+    std::string deep_model = "google/gemma-4-12b-qat";
     size_t      context_limit = 60'000;
     int         auto_max = 50;
 };
 
-static std::string trim_copy(std::string s) {
-    auto not_space = [](unsigned char c){ return !std::isspace(c); };
+static std::string trim_copy(std::string s) 
+{
+    auto not_space = [](unsigned char c) { return !std::isspace(c); };
     s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
     s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
     return s;
 }
 
-static std::string lowercase_copy(std::string s) {
+static std::string lowercase_copy(std::string s) 
+{
     std::transform(s.begin(), s.end(), s.begin(),
-                   [](unsigned char c){ return (char)std::tolower(c); });
+        [](unsigned char c) { return (char)std::tolower(c); });
     return s;
 }
 
-static bool parse_size_value(const std::string& text, size_t& out) {
+static bool parse_size_value(const std::string& text, size_t& out) 
+{
     try {
         size_t pos = 0;
         unsigned long long value = std::stoull(text, &pos);
@@ -63,7 +63,8 @@ static bool parse_size_value(const std::string& text, size_t& out) {
             out = (size_t)value;
             return true;
         }
-    } catch (...) {}
+    }
+    catch (...) {}
     return false;
 }
 
@@ -75,61 +76,57 @@ static bool parse_int_value(const std::string& text, int& out) {
             out = value;
             return true;
         }
-    } catch (...) {}
+    }
+    catch (...) {}
     return false;
 }
 
-static void apply_config_entry(StartupConfig& config, const std::string& key,
-                               const std::string& value, int line_number) {
+static void apply_config_entry(StartupConfig& config, const std::string& key, const std::string& value, int line_number)
+{
     std::string k = lowercase_copy(trim_copy(key));
     std::string v = trim_copy(value);
 
-    if (k == "working_dir" || k == "repo" || k == "repo_root") 
+    if (k == "working_dir")
     {
         config.working_dir = v;
-    } 
-    else if (k == "api_base" || k == "api_url" || k == "model_ip" || k == "server") 
+    }
+    else if (k == "ip")
     {
         config.api_base = v;
-    } 
-    else if (k == "model") 
+    }
+    else if (k == "quick_model")
     {
         config.quick_model = v;
-        config.deep_model = v;
-    } 
-    else if (k == "quick") 
-    {
-        config.quick_model = v;
-    } 
-    else if (k == "deep") 
+    }
+    else if (k == "deep_model")
     {
         config.deep_model = v;
-    } 
-    else if (k == "context")
-     {
+    }
+    else if (k == "context_limit")
+    {
         size_t parsed = 0;
-        if (parse_size_value(v, parsed)) 
+        if (parse_size_value(v, parsed))
         {
             config.context_limit = parsed;
         }
-        else 
+        else
         {
             std::cerr << "[config] line " << line_number << ": invalid context value '" << v << "'\n";
         }
-    } 
-    else if (k == "auto_max" || k == "automax") 
+    }
+    else if (k == "auto_max")
     {
         int parsed = 0;
-        if (parse_int_value(v, parsed)) 
+        if (parse_int_value(v, parsed))
         {
             config.auto_max = std::max(1, parsed);
         }
-        else 
+        else
         {
             std::cerr << "[config] line " << line_number << ": invalid auto_max value '" << v << "'\n";
         }
-    } 
-    else 
+    }
+    else
     {
         std::cerr << "[config] line " << line_number << ": unknown key '" << key << "'\n";
     }
@@ -184,7 +181,8 @@ static bool split_two_args(const std::string& input, std::string& first, std::st
     return true;
 }
 
-int main(int argc, char* argv[]) {
+int main(int argc, char* argv[]) 
+{
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
@@ -202,7 +200,8 @@ int main(int argc, char* argv[]) {
                 return 1;
             }
             config_path = argv[++i];
-        } else {
+        }
+        else {
             positional.push_back(arg);
         }
     }
@@ -228,12 +227,14 @@ int main(int argc, char* argv[]) {
     std::cout << "  API Base URL:      " << config.api_base << "\n";
     if (!config.quick_model.empty()) {
         std::cout << "  Quick Model:       " << config.quick_model << "\n";
-    } else {
+    }
+    else {
         std::cout << "  Quick Model:       (Default/None)\n";
     }
     if (!config.deep_model.empty()) {
         std::cout << "  Deep Model:        " << config.deep_model << "\n";
-    } else {
+    }
+    else {
         std::cout << "  Deep Model:        (Default/None)\n";
     }
     std::cout << "  Context Limit:     " << config.context_limit << "\n";
@@ -255,87 +256,77 @@ int main(int argc, char* argv[]) {
         // Strip trailing CR (\r\n on Windows)
         if (!line.empty() && line.back() == '\r') line.pop_back();
 
-        if (line == "exit" || line == "quit") break;
-        if (line.empty()) continue;
-
-        if (line == "/help")  { print_help(); continue; }
-        if (line == "/reset") { agent.reset(); std::cout << "[history cleared]\n"; continue; }
-
-        if (line == "/repo") {
+        if (line == "exit")
+        {
+            break;
+        }
+        else if (line == "/help")
+        {
+            print_help();
+        }
+        else if (line == "/reset")
+        {
+            agent.reset(); std::cout << "[history cleared]\n";
+        }
+        else if (line == "/repo")
+        {
             agent.set_repo();
-            continue;
         }
-        if (line.starts_with("/repo ")) {
+        else if (line.starts_with("/repo "))
+        {
             agent.set_repo(line.substr(6));
-            continue;
         }
-
-        if (line.starts_with("/model ")) {
-            agent.set_model(line.substr(7));
-            std::cout << "[quick and deep models set to: " << line.substr(7) << "]\n";
-            continue;
-        }
-
-        if (line.starts_with("/models ")) {
-            std::string quick;
-            std::string deep;
-            if (!split_two_args(line.substr(8), quick, deep)) {
-                std::cerr << "[error] usage: /models <quick_model> <deep_model>\n";
-                continue;
-            }
-            agent.set_models(quick, deep);
-            std::cout << "[quick model set to: " << quick << "]\n";
-            std::cout << "[deep model set to: " << deep << "]\n";
-            continue;
-        }
-
-        if (line.starts_with("/quickmodel ")) {
+        else if (line.starts_with("/quick "))
+        {
             agent.set_quick_model(line.substr(12));
             std::cout << "[quick model set to: " << line.substr(12) << "]\n";
-            continue;
         }
-
-        if (line.starts_with("/deepmodel ")) {
+        else if (line.starts_with("/deep "))
+        {
             agent.set_deep_model(line.substr(11));
             std::cout << "[deep model set to: " << line.substr(11) << "]\n";
-            continue;
         }
-
-        if (line.starts_with("/api ")) {
+        else if (line.starts_with("/api "))
+        {
             agent.set_api_base(line.substr(5));
             std::cout << "[api base set to: " << line.substr(5) << "]\n";
-            continue;
         }
-
-        if (line.starts_with("/context ")) {
-            try {
+        else if (line.starts_with("/context "))
+        {
+            try
+            {
                 size_t limit = std::stoull(line.substr(9));
                 agent.set_context_limit(limit);
                 std::cout << "[context limit set to " << limit << " chars]\n";
-            } catch (...) {
+            }
+            catch (...)
+            {
                 std::cerr << "[error] usage: /context <number of chars>\n";
             }
-            continue;
         }
-
-        if (line.starts_with("/automax ")) {
-            try {
+         
+        else if (line.starts_with("/automax "))
+        {
+            try
+            {
                 auto_max = std::stoi(line.substr(9));
                 if (auto_max < 1) auto_max = 1;
                 std::cout << "[auto max iterations set to " << auto_max << "]\n";
-            } catch (...) {
+            }
+            catch (...)
+            {
                 std::cerr << "[error] usage: /automax <number>\n";
             }
-            continue;
         }
 
-        if (line.starts_with("/auto ")) {
+        else if (line.starts_with("/auto "))
+        {
             std::string task = line.substr(6);
             // Trim leading whitespace
             auto ns = task.find_first_not_of(" \t");
-            if (ns == std::string::npos) {
+            if (ns == std::string::npos)
+            {
                 std::cerr << "[error] usage: /auto <task description>\n";
-                continue;
             }
             task = task.substr(ns);
 
@@ -344,21 +335,22 @@ int main(int argc, char* argv[]) {
             agent.run(task);
 
             int iter = 1;
-            while (!agent.task_done() && iter < auto_max) {
+            while (!agent.task_done() && iter < auto_max)
+            {
                 ++iter;
                 std::cout << "\n[auto] iteration " << iter << "/" << auto_max << "\n";
-                agent.run("Continue with the task. Review what has been done so far and take the next step. "
-                          "When everything is fully complete and verified, call finish_task with a summary.");
+                agent.run("Continue with the task. Review what has been done so far and take the next step. When everything is fully complete and verified, call finish_task with a summary.");
             }
 
-            if (agent.task_done()) {
+            if (agent.task_done())
+            {
                 std::cout << "\n[auto] done after " << iter << " iteration(s)\n";
                 std::cout << "[auto] summary: " << agent.task_summary() << "\n\n";
-            } else {
-                std::cerr << "\n[auto] reached max iterations (" << auto_max
-                          << ") — task may be incomplete. Type a message to continue manually.\n\n";
             }
-            continue;
+            else
+            {
+                std::cerr << "\n[auto] reached max iterations (" << auto_max << ") — task may be incomplete. Type a message to continue manually.\n\n";
+            }
         }
 
         agent.run(line);

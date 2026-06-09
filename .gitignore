@@ -2,3 +2,4 @@
 build/
 /CMakeLists.txt
 /build.ps1
+.vs/

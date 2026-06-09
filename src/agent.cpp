@@ -118,12 +118,14 @@ Agent::Agent(std::string api_base, std::string working_dir,
 // Public API
 // ---------------------------------------------------------------------------
 
-void Agent::reset() {
+void Agent::reset() 
+{
     messages_.clear();
     messages_.push_back(make_msg("system", SYSTEM_PROMPT));
 }
 
-void Agent::set_repo(const std::string& path) {
+void Agent::set_repo(const std::string& path) 
+{
     namespace fs = std::filesystem;
 
     if (!path.empty()) {
@@ -154,7 +156,8 @@ void Agent::set_repo(const std::string& path) {
     std::cout << "[repo] root set to: " << tools_.get_working_dir() << "\n";
 }
 
-void Agent::inject_repo_map() {
+void Agent::inject_repo_map() 
+{
     Document empty;
     empty.SetObject();
     ToolResult r = tools_.dispatch("list_files", empty);
