@@ -24,15 +24,13 @@ static void print_help() {
         "  /model <name>    - set both quick and deep models to the same model\n"
         "  /models <quick> <deep>\n"
         "                   - set quick and deep model identifiers\n"
-        "  /quickmodel <name>\n"
-        "                   - set the quick-question model\n"
-        "  /deepmodel <name>\n"
-        "                   - set the deeper-reasoning model\n"
+        "  /quick <name>    - set the quick-question model\n"
+        "  /deep  <name>    - set the deeper-reasoning model\n"
         "  /api <url>       - change LLM server address (e.g. /api http://192.168.1.50:1234)\n"
         "  /context <chars> - set context trim limit (default 60000)\n"
         "  startup config   - load cppagent_config.txt, CppAgent/config.txt, or --config <path>\n"
         "  /help            - show this message\n"
-        "  exit / quit      - exit\n\n";
+        "  / quit      - exit\n\n";
 }
 
 struct StartupConfig {
@@ -86,26 +84,53 @@ static void apply_config_entry(StartupConfig& config, const std::string& key,
     std::string k = lowercase_copy(trim_copy(key));
     std::string v = trim_copy(value);
 
-    if (k == "working_dir" || k == "repo" || k == "repo_root") {
+    if (k == "working_dir" || k == "repo" || k == "repo_root") 
+    {
         config.working_dir = v;
-    } else if (k == "api_base" || k == "api_url" || k == "model_ip" || k == "server") {
+    } 
+    else if (k == "api_base" || k == "api_url" || k == "model_ip" || k == "server") 
+    {
         config.api_base = v;
-    } else if (k == "model") {
+    } 
+    else if (k == "model") 
+    {
         config.quick_model = v;
         config.deep_model = v;
-    } else if (k == "quick_model" || k == "quickmodel") {
+    } 
+    else if (k == "quick") 
+    {
         config.quick_model = v;
-    } else if (k == "deep_model" || k == "deepmodel" || k == "reasoning_model") {
+    } 
+    else if (k == "deep") 
+    {
         config.deep_model = v;
-    } else if (k == "context_limit" || k == "context_length" || k == "context") {
+    } 
+    else if (k == "context")
+     {
         size_t parsed = 0;
-        if (parse_size_value(v, parsed)) config.context_limit = parsed;
-        else std::cerr << "[config] line " << line_number << ": invalid context value '" << v << "'\n";
-    } else if (k == "auto_max" || k == "automax") {
+        if (parse_size_value(v, parsed)) 
+        {
+            config.context_limit = parsed;
+        }
+        else 
+        {
+            std::cerr << "[config] line " << line_number << ": invalid context value '" << v << "'\n";
+        }
+    } 
+    else if (k == "auto_max" || k == "automax") 
+    {
         int parsed = 0;
-        if (parse_int_value(v, parsed)) config.auto_max = std::max(1, parsed);
-        else std::cerr << "[config] line " << line_number << ": invalid auto_max value '" << v << "'\n";
-    } else {
+        if (parse_int_value(v, parsed)) 
+        {
+            config.auto_max = std::max(1, parsed);
+        }
+        else 
+        {
+            std::cerr << "[config] line " << line_number << ": invalid auto_max value '" << v << "'\n";
+        }
+    } 
+    else 
+    {
         std::cerr << "[config] line " << line_number << ": unknown key '" << key << "'\n";
     }
 }
