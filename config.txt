@@ -1,6 +1,0 @@
-working_dir=.
-ip=http://127.0.0.1:1234
-quick_model=google/gemma-4-e2b
-deep_model=google/gemma-4-12b-qat
-context_limit=60000
-auto_max=50

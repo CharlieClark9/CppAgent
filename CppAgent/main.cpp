@@ -13,7 +13,8 @@
 
 namespace fs = std::filesystem;
 
-static void print_help() {
+static void print_help() 
+{
     std::cout <<
         "Commands:\n"
         "  /repo            - scan current repo and inject file tree into context\n"
@@ -30,221 +31,19 @@ static void print_help() {
         "  /exit            - exit\n\n";
 }
 
-struct StartupConfig {
-    std::string working_dir = fs::current_path().string();
-    std::string api_base = "http://127.0.0.1:1234";
-    std::string quick_model = "google/gemma-4-e2b";
-    std::string deep_model = "google/gemma-4-12b-qat";
-    size_t      context_limit = 60'000;
-    int         auto_max = 50;
-};
-
-static std::string trim_copy(std::string s) 
+int main(int argc, char* argv[])
 {
-    auto not_space = [](unsigned char c) { return !std::isspace(c); };
-    s.erase(s.begin(), std::find_if(s.begin(), s.end(), not_space));
-    s.erase(std::find_if(s.rbegin(), s.rend(), not_space).base(), s.end());
-    return s;
-}
+    std::string ip = "127.0.0.1:1234";
+    std::string repo = "";
+    std::string quickModel = "google/gemma-4-e2b";
+    std::string deepModel = "google/gemma-4-e2b";
 
-static std::string lowercase_copy(std::string s) 
-{
-    std::transform(s.begin(), s.end(), s.begin(),
-        [](unsigned char c) { return (char)std::tolower(c); });
-    return s;
-}
+    int contextLimit = 60000;
+    int auto_max = 50;
 
-static bool parse_size_value(const std::string& text, size_t& out) 
-{
-    try {
-        size_t pos = 0;
-        unsigned long long value = std::stoull(text, &pos);
-        if (trim_copy(text.substr(pos)).empty()) {
-            out = (size_t)value;
-            return true;
-        }
-    }
-    catch (...) {}
-    return false;
-}
+    Agent agent(ip, repo, quickModel, deepModell);
+    agent.set_context_limit(contextLimit);
 
-static bool parse_int_value(const std::string& text, int& out) {
-    try {
-        size_t pos = 0;
-        int value = std::stoi(text, &pos);
-        if (trim_copy(text.substr(pos)).empty()) {
-            out = value;
-            return true;
-        }
-    }
-    catch (...) {}
-    return false;
-}
-
-static void apply_config_entry(StartupConfig& config, const std::string& key, const std::string& value, int line_number)
-{
-    std::string k = lowercase_copy(trim_copy(key));
-    std::string v = trim_copy(value);
-
-    if (k == "working_dir")
-    {
-        config.working_dir = v;
-    }
-    else if (k == "ip")
-    {
-        config.api_base = v;
-    }
-    else if (k == "quick_model")
-    {
-        config.quick_model = v;
-    }
-    else if (k == "deep_model")
-    {
-        config.deep_model = v;
-    }
-    else if (k == "context_limit")
-    {
-        size_t parsed = 0;
-        if (parse_size_value(v, parsed))
-        {
-            config.context_limit = parsed;
-        }
-        else
-        {
-            std::cerr << "[config] line " << line_number << ": invalid context value '" << v << "'\n";
-        }
-    }
-    else if (k == "auto_max")
-    {
-        int parsed = 0;
-        if (parse_int_value(v, parsed))
-        {
-            config.auto_max = std::max(1, parsed);
-        }
-        else
-        {
-            std::cerr << "[config] line " << line_number << ": invalid auto_max value '" << v << "'\n";
-        }
-    }
-    else
-    {
-        std::cerr << "[config] line " << line_number << ": unknown key '" << key << "'\n";
-    }
-}
-
-static bool load_startup_config(const fs::path& path, StartupConfig& config) {
-    std::ifstream in(path);
-    if (!in) return false;
-
-    std::string line;
-    int line_number = 0;
-    while (std::getline(in, line)) {
-        ++line_number;
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-
-        std::string trimmed = trim_copy(line);
-        if (trimmed.empty() || trimmed.starts_with("#")) continue;
-
-        auto eq = trimmed.find('=');
-        if (eq == std::string::npos) {
-            std::cerr << "[config] line " << line_number << ": expected key=value\n";
-            continue;
-        }
-
-        apply_config_entry(config, trimmed.substr(0, eq), trimmed.substr(eq + 1), line_number);
-    }
-
-    return true;
-}
-
-static fs::path default_config_path() {
-    fs::path cwd_config = fs::current_path() / "cppagent_config.txt";
-    if (fs::exists(cwd_config)) return cwd_config;
-
-    fs::path app_config = fs::current_path() / "CppAgent" / "config.txt";
-    if (fs::exists(app_config)) return app_config;
-
-    return {};
-}
-
-static bool split_two_args(const std::string& input, std::string& first, std::string& second) {
-    auto ns = input.find_first_not_of(" \t");
-    if (ns == std::string::npos) return false;
-    auto split = input.find_first_of(" \t", ns);
-    if (split == std::string::npos) return false;
-
-    first = input.substr(ns, split - ns);
-
-    auto second_start = input.find_first_not_of(" \t", split);
-    if (second_start == std::string::npos) return false;
-    second = input.substr(second_start);
-    return true;
-}
-
-int main(int argc, char* argv[]) 
-{
-#ifdef _WIN32
-    SetConsoleOutputCP(CP_UTF8);
-    SetConsoleCP(CP_UTF8);
-#endif
-
-    StartupConfig config;
-    fs::path config_path;
-    std::vector<std::string> positional;
-
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        if (arg == "--config") {
-            if (i + 1 >= argc) {
-                std::cerr << "[error] usage: --config <path>\n";
-                return 1;
-            }
-            config_path = argv[++i];
-        }
-        else {
-            positional.push_back(arg);
-        }
-    }
-
-    if (config_path.empty()) config_path = default_config_path();
-    if (!config_path.empty()) {
-        if (load_startup_config(config_path, config))
-            std::cout << "[config] loaded " << config_path.string() << "\n";
-        else
-            std::cerr << "[config] could not load " << config_path.string() << "\n";
-    }
-
-    if (positional.size() > 0) config.working_dir = positional[0];
-    if (positional.size() > 1) config.api_base = positional[1];
-    if (positional.size() > 2) config.quick_model = positional[2];
-    if (positional.size() > 3) config.deep_model = positional[3];
-    if (config.deep_model.empty()) config.deep_model = config.quick_model;
-
-    // Updated initialization print statement for better readability
-    std::cout << "========================================\n";
-    std::cout << "CppAgent Initializing:\n";
-    std::cout << "  Working Directory: " << config.working_dir << "\n";
-    std::cout << "  API Base URL:      " << config.api_base << "\n";
-    if (!config.quick_model.empty()) {
-        std::cout << "  Quick Model:       " << config.quick_model << "\n";
-    }
-    else {
-        std::cout << "  Quick Model:       (Default/None)\n";
-    }
-    if (!config.deep_model.empty()) {
-        std::cout << "  Deep Model:        " << config.deep_model << "\n";
-    }
-    else {
-        std::cout << "  Deep Model:        (Default/None)\n";
-    }
-    std::cout << "  Context Limit:     " << config.context_limit << "\n";
-    std::cout << "  Auto Max:          " << config.auto_max << "\n";
-    std::cout << "========================================\n";
-
-    Agent agent(config.api_base, config.working_dir, config.quick_model, config.deep_model);
-    agent.set_context_limit(config.context_limit);
-
-    int auto_max = config.auto_max;
 
     std::string line;
     while (true) {
@@ -304,7 +103,7 @@ int main(int argc, char* argv[])
                 std::cerr << "[error] usage: /context <number of chars>\n";
             }
         }
-         
+
         else if (line.starts_with("/automax "))
         {
             try

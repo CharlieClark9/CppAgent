@@ -11,14 +11,14 @@ option(CPPAGENT_FETCH_DEPS "Download header-only dependencies if they are not in
 include(FetchContent)
 
 add_executable(CppAgent
-    CppAgent/src/main.cpp
-    CppAgent/src/agent.cpp
-    CppAgent/src/tools.cpp
+    CppAgent/main.cpp
+    CppAgent/agent.cpp
+    CppAgent/tools.cpp
 )
 
 target_include_directories(CppAgent
     PRIVATE
-        CppAgent/src
+        CppAgent
 )
 
 if(WIN32)
